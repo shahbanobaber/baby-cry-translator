@@ -41,7 +41,7 @@ This file was committed before the first CNN was trained. Any change made after 
 | 4 | Random forest on the paper's 10 acoustic features | The paper's method on our splits |
 | 5 | CNN on log-mel spectrograms | The main model |
 | 6 | CNN, standardised per baby | Does cause survive once identity is removed? |
-| 7 | AST (Audio Spectrogram Transformer, pretrained on AudioSet, which includes baby cries), frozen, with a small classifier on top | Is the CNN limited by having only 612 episodes? |
+| 7 | AST (Audio Spectrogram Transformer, pretrained on AudioSet, which includes baby cries), frozen; logistic regression on its 768-number embedding, strong fixed regularisation (C = 0.01, no tuning) | Is the CNN limited by having only 612 episodes? |
 | 8 | Same CNN, trained to tell the 24 babies' recordings apart | Positive control: can this pipeline learn anything from these spectrograms? It may use each home's background sound as well as the voice. |
 
 Models 1 to 3 are counting rules with no training.
@@ -120,7 +120,10 @@ python src/prep.py                                   # spectrograms and splits (
 python src/train.py --split B                        # 6 folds x 3 seeds
 python src/train.py --split A                        # 5 repeats x 3 seeds
 python src/train.py --split B --per-baby-norm        # model 6
-python src/evaluate.py runs/splitB runs/splitB_perbaby
+python src/train.py --task identity                  # model 8
+python src/forest.py --split B                       # model 4 (CPU)
+python src/ast_probe.py extract && python src/ast_probe.py fit --split B   # model 7
+python src/evaluate.py runs/splitB runs/splitB_perbaby runs/forest_splitB runs/ast_splitB
 ```
 
 ## Changes after results
