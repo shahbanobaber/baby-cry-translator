@@ -8,6 +8,10 @@ Output (data/processed/):
 Cries are stored at full length. Cropping to 1.5 s happens at training time,
 so long cries can be cropped at a random place each epoch.
 
+Decibels are measured against the loudest point of the whole crying episode.
+That keeps how loud each cry is within its episode, and removes the distance
+to the microphone, which changes between episodes.
+
 Run:  python src/prep.py            (all 39,201 cries)
       python src/prep.py --limit 200 (quick check)
 """
@@ -29,7 +33,7 @@ N_FFT = 512        # 32 ms Hann window
 HOP = 160          # 10 ms hop
 N_MELS = 64
 FMIN, FMAX = 100, 8_000
-TOP_DB = 80        # floor, relative to each cry's peak
+TOP_DB = 80        # floor, relative to the episode's loudest point
 
 SEED = 0
 N_FOLDS = 6        # split B: 24 babies -> 6 groups of 4
@@ -45,8 +49,8 @@ def log_mel(path):
         window="hann", center=True, power=2.0,
         n_mels=N_MELS, fmin=FMIN, fmax=FMAX,
     )
-    db = librosa.power_to_db(m, ref=np.max, top_db=TOP_DB)  # peak = 0 dB
-    return db.T.astype(np.float16)  # (frames, 64)
+    db = librosa.power_to_db(m, ref=1.0, amin=1e-10, top_db=None)  # absolute; made relative per episode in main()
+    return db.T.astype(np.float32)  # (frames, 64)
 
 
 def load_labels():
@@ -117,8 +121,12 @@ def main():
         if (i + 1) % 2000 == 0:
             print(f"{i + 1}/{len(df)} cries", flush=True)
 
-    np.save(OUT / "specs.npy", np.concatenate(specs))
+    # loudest point of each episode = 0 dB; floor at -80 dB
     df["offset"], df["n_frames"] = offsets, lengths
+    peak = {e: max(specs[i].max() for i in g.index) for e, g in df.groupby("episode")}
+    for i, e in enumerate(df.episode):
+        specs[i] = np.maximum(specs[i] - peak[e], -TOP_DB).astype(np.float16)
+    np.save(OUT / "specs.npy", np.concatenate(specs))
     df.to_csv(OUT / "index.csv", index=False)
 
     eps = df.drop_duplicates("episode")[["episode", "baby", "cause"]]

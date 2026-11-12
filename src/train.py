@@ -6,7 +6,8 @@ Run:  python src/train.py --split B --fold 0
       python src/train.py --split B --fold all --per-baby-norm      (experiment 2)
       python src/train.py --split B --fold 0 --epochs 2 --smoke     (quick check)
 
-Writes runs/<name>/fold<k>.csv (one row per test episode) and fold<k>.json (summary).
+Writes runs/<name>/fold<k>_seed<s>.csv (one row per test episode) and .json (summary).
+Each fold is trained with 3 seeds by default.
 """
 import argparse
 import json
@@ -47,34 +48,61 @@ class Cries:
         return self.idx[self.idx[key].isin(s)]
 
     def fit_norm(self, train_rows):
-        """Mean and spread per mel band. Global: from training cries only.
-        Per baby: from each baby's own cries (no labels needed; an app would record a few first)."""
-        def stats(rows):
-            fr = np.concatenate([self.specs[o:o + n] for o, n in zip(rows.offset, rows.n_frames)]).astype(np.float32)
-            return fr.mean(0), fr.std(0) + 1e-5
-        if self.per_baby_norm:
-            self.norm = {b: stats(g) for b, g in self.idx.groupby("baby")}
-        else:
-            self.norm = {"all": stats(train_rows)}
+        """Mean and spread per mel band.
+        Global: from training babies only.
+        Per baby: from the same baby's other episodes, never the episode being scored.
+        No labels are used; an app would calibrate on a baby's earlier cries the same way."""
+        if not self.per_baby_norm:
+            fr = np.concatenate([self.specs[o:o + n] for o, n in zip(train_rows.offset, train_rows.n_frames)]).astype(np.float32)
+            self.norm = {"all": (fr.mean(0), fr.std(0) + 1e-5)}
+            return
+        sums = {}  # episode -> (sum, sum of squares, frame count)
+        for e, g in self.idx.groupby("episode"):
+            fr = np.concatenate([self.specs[o:o + n] for o, n in zip(g.offset, g.n_frames)]).astype(np.float64)
+            sums[e] = (fr.sum(0), (fr ** 2).sum(0), len(fr), g.baby.iloc[0])
+        baby = {}
+        for s1, s2, n, b in sums.values():
+            t = baby.get(b, (0.0, 0.0, 0))
+            baby[b] = (t[0] + s1, t[1] + s2, t[2] + n)
+        self.norm = {}
+        for e, (s1, s2, n, b) in sums.items():
+            t1, t2, tn = baby[b][0] - s1, baby[b][1] - s2, baby[b][2] - n
+            mean = t1 / tn
+            self.norm[e] = (mean.astype(np.float32), (np.sqrt(np.maximum(t2 / tn - mean ** 2, 0)) + 1e-5).astype(np.float32))
 
-    def crop(self, r, train, rng):
+    def window(self, r, start, rng, train):
+        """One 1.5 s window of a cry. Short cries are padded with silence."""
         x = self.specs[r.offset:r.offset + r.n_frames].astype(np.float32)
         n = len(x)
         if n >= FRAMES:
-            start = rng.integers(0, n - FRAMES + 1) if train else (n - FRAMES) // 2
+            if start is None:
+                start = rng.integers(0, n - FRAMES + 1)
             x = x[start:start + FRAMES]
         else:
             out = np.full((FRAMES, x.shape[1]), SILENCE, np.float32)
-            start = rng.integers(0, FRAMES - n + 1) if train else (FRAMES - n) // 2
-            out[start:start + n] = x
+            pad = rng.integers(0, FRAMES - n + 1) if train else (FRAMES - n) // 2
+            out[pad:pad + n] = x
             x = out
-        mean, std = self.norm[r.baby if self.per_baby_norm else "all"]
+        mean, std = self.norm[r.episode if self.per_baby_norm else "all"]
         return ((x - mean) / std).T  # (64, 151)
 
-    def batch(self, rows, train, rng):
-        x = np.stack([self.crop(r, train, rng) for r in rows.itertuples()])
-        if train:
-            x = spec_augment(x, rng)
+    def windows_for_test(self, rows):
+        """Sliding 1.5 s windows (half overlap) so long cries are scored in full."""
+        out = []
+        for r in rows.itertuples():
+            if r.n_frames <= FRAMES:
+                out.append((r, 0))
+            else:
+                starts = list(range(0, r.n_frames - FRAMES + 1, FRAMES // 2))
+                if starts[-1] != r.n_frames - FRAMES:
+                    starts.append(r.n_frames - FRAMES)
+                out += [(r, st) for st in starts]
+        return out
+
+    def batch(self, rows, rng):
+        """Training batch: a random window of each cry, then SpecAugment."""
+        x = np.stack([self.window(r, None, rng, train=True) for r in rows.itertuples()])
+        x = spec_augment(x, rng)
         return torch.from_numpy(x[:, None]), torch.from_numpy(rows.y.to_numpy(copy=True))
 
 
@@ -121,16 +149,21 @@ class CryCNN(nn.Module):
 
 @torch.no_grad()
 def predict_episodes(model, data, rows, device, rng):
-    """Score every cry (centre crop), then average the probabilities over each episode."""
+    """Score every window of every cry, average windows into cries,
+    then average cries into one answer per episode."""
     model.eval()
+    wins = data.windows_for_test(rows)
     probs = []
-    for i in range(0, len(rows), 256):
-        x, _ = data.batch(rows.iloc[i:i + 256], train=False, rng=rng)
-        probs.append(torch.softmax(model(x.to(device)), 1).cpu().numpy())
-    p = pd.DataFrame(np.concatenate(probs), columns=CLASSES, index=rows.index)
-    p["episode"], p["baby"], p["cause"] = rows.episode, rows.baby, rows.cause
-    ep = p.groupby("episode").agg({**{c: "mean" for c in CLASSES}, "baby": "first", "cause": "first"})
-    ep["n_cries"] = p.groupby("episode").size()
+    for i in range(0, len(wins), 512):
+        chunk = wins[i:i + 512]
+        x = np.stack([data.window(r, st, rng, train=False) for r, st in chunk])
+        probs.append(torch.softmax(model(torch.from_numpy(x[:, None]).to(device)), 1).cpu().numpy())
+    p = pd.DataFrame(np.concatenate(probs), columns=CLASSES)
+    p["cry"] = [r.Index for r, _ in wins]
+    cry = p.groupby("cry")[CLASSES].mean()
+    cry = cry.join(rows[["episode", "baby", "cause"]])
+    ep = cry.groupby("episode").agg({**{c: "mean" for c in CLASSES}, "baby": "first", "cause": "first"})
+    ep["n_cries"] = cry.groupby("episode").size()
     ep["pred"] = ep[CLASSES].idxmax(axis=1)
     return ep.reset_index()
 
@@ -141,9 +174,9 @@ def balanced_accuracy(ep):
 
 # ---------- training ----------
 
-def run_fold(data, split, fold, args, device, out_dir):
-    rng = np.random.default_rng(args.seed + fold)
-    torch.manual_seed(args.seed + fold)
+def run_fold(data, split, fold, seed, args, device, out_dir):
+    rng = np.random.default_rng(1000 * seed + fold)
+    torch.manual_seed(1000 * seed + fold)
     train, val, test = (data.rows(split, fold, p) for p in ("train", "val", "test"))
     if args.smoke:  # tiny run to check the code end to end
         train, val, test = (r[r.episode.isin(r.episode.drop_duplicates().sample(12, random_state=0))] for r in (train, val, test))
@@ -164,7 +197,7 @@ def run_fold(data, split, fold, args, device, out_dir):
         t0, losses = time.time(), []
         rows = epoch_rows(train, rng)
         for i in range(0, len(rows), BATCH):
-            x, y = data.batch(rows.iloc[i:i + BATCH], train=True, rng=rng)
+            x, y = data.batch(rows.iloc[i:i + BATCH], rng)
             loss = loss_fn(model(x.to(device)), y.to(device))
             opt.zero_grad()
             loss.backward()
@@ -173,18 +206,19 @@ def run_fold(data, split, fold, args, device, out_dir):
         sched.step()
         val_bacc = balanced_accuracy(predict_episodes(model, data, val, device, rng))
         history.append({"epoch": epoch + 1, "loss": float(np.mean(losses)), "val_bacc": val_bacc})
-        print(f"  fold {fold} epoch {epoch + 1:2d}  loss {np.mean(losses):.3f}  val {val_bacc:.3f}  ({time.time() - t0:.0f}s)", flush=True)
+        print(f"  seed {seed} fold {fold} epoch {epoch + 1:2d}  loss {np.mean(losses):.3f}  val {val_bacc:.3f}  ({time.time() - t0:.0f}s)", flush=True)
         if val_bacc > best:
             best, best_state = val_bacc, {k: v.detach().clone() for k, v in model.state_dict().items()}
 
     model.load_state_dict(best_state)
     ep = predict_episodes(model, data, test, device, rng)
-    ep.to_csv(out_dir / f"fold{fold}.csv", index=False)
-    summary = {"split": split, "fold": fold, "per_baby_norm": args.per_baby_norm,
+    ep["seed"], ep["fold"] = seed, fold
+    ep.to_csv(out_dir / f"fold{fold}_seed{seed}.csv", index=False)
+    summary = {"split": split, "fold": fold, "seed": seed, "per_baby_norm": args.per_baby_norm,
                "test_bacc": balanced_accuracy(ep), "val_bacc_best": best,
                "test_episodes": len(ep), "test_babies": sorted(ep.baby.unique()), "history": history}
-    (out_dir / f"fold{fold}.json").write_text(json.dumps(summary, indent=1))
-    print(f"fold {fold}: test balanced accuracy {summary['test_bacc']:.3f} on {len(ep)} episodes", flush=True)
+    (out_dir / f"fold{fold}_seed{seed}.json").write_text(json.dumps(summary, indent=1))
+    print(f"seed {seed} fold {fold}: test balanced accuracy {summary['test_bacc']:.3f} on {len(ep)} episodes", flush=True)
 
 
 def main():
@@ -194,7 +228,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--per-baby-norm", action="store_true")
     ap.add_argument("--smoke", action="store_true", help="12 episodes per part, to test the code")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seeds", type=int, default=3, help="train each fold this many times with different seeds")
     ap.add_argument("--name", default=None, help="run folder name")
     args = ap.parse_args()
 
@@ -209,8 +243,9 @@ def main():
     name = args.name or f"split{args.split}" + ("_perbaby" if args.per_baby_norm else "") + ("_smoke" if args.smoke else "")
     out_dir = ROOT / "runs" / name
     out_dir.mkdir(parents=True, exist_ok=True)
-    for f in folds:
-        run_fold(data, args.split, f, args, device, out_dir)
+    for seed in range(args.seeds):
+        for f in folds:
+            run_fold(data, args.split, f, seed, args, device, out_dir)
 
 
 if __name__ == "__main__":
