@@ -23,6 +23,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)  # empty classes in a
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data/processed"
 CLASSES = ["hunger", "discomfort", "loneliness"]
+SPLIT_KEY = {"A": "A_by_episode", "B": "B_by_baby", "C": "C_by_time"}
 N_BOOT = 2000
 PASS_MARK = 1 / 3  # the CNN beats chance only if its whole 95% interval is above this
 
@@ -40,12 +41,12 @@ def episode_info():
 def baseline(split, rule, info):
     """Majority: the most common cause in training.
     Age-only: the most common cause for that age in training.
-    Baby-only: the most common cause for that baby in training (split A only)."""
+    Baby-only: the most common cause for that baby in training (splits A and C).
+    Baby + time: the most common cause for that baby at that time of day (day or night)."""
     splits = json.loads((DATA / "splits.json").read_text())
-    key = "A_by_episode" if split == "A" else "B_by_baby"
     rows = []
-    for fold, s in enumerate(splits[key]):
-        unit = "episode" if split == "A" else "baby"
+    for fold, s in enumerate(splits[SPLIT_KEY[split]]):
+        unit = "baby" if split == "B" else "episode"
         tr = info.reset_index()
         tr = tr[tr[unit].isin(s["train"] + s["val"])]
         te = info.reset_index()
@@ -53,6 +54,10 @@ def baseline(split, rule, info):
         overall = tr.cause.mode()[0]
         if rule == "majority":
             pred = [overall] * len(te)
+        elif rule == "baby+time":
+            by_bt = tr.groupby(["baby", "time"]).cause.agg(lambda c: c.mode()[0])
+            by_b = tr.groupby("baby").cause.agg(lambda c: c.mode()[0])
+            pred = [by_bt.get((b, t), by_b.get(b, overall)) for b, t in zip(te.baby, te.time)]
         else:
             col = {"age-only": "age_month", "baby-only": "baby"}[rule]
             by = tr.groupby(col).cause.agg(lambda c: c.mode()[0])
@@ -119,7 +124,7 @@ def main():
     split = splits.pop()
 
     models = {name: p for name, (_, p) in loaded.items()}
-    for rule in ["majority", "age-only"] + (["baby-only"] if split == "A" else []):
+    for rule in ["majority", "age-only"] + {"A": ["baby-only"], "B": [], "C": ["baby-only", "baby+time"]}[split]:
         models[rule] = baseline(split, rule, info)
 
     babies = sorted(info.baby.unique())

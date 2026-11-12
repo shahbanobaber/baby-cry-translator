@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data/processed"
 AUDIO = ROOT / "data/raw/enes/audio/00_pooled_separate"
 CLASSES = ["hunger", "discomfort", "loneliness"]
+SPLIT_KEY = {"A": "A_by_episode", "B": "B_by_baby", "C": "C_by_time"}
 CHECKPOINT = "MIT/ast-finetuned-audioset-10-10-0.4593"
 SR = 16_000
 
@@ -49,27 +50,33 @@ def extract():
     print("saved", DATA / "ast_emb.npy", out.shape)
 
 
-def fit(split):
+def fit(split, personal):
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
     idx = pd.read_csv(DATA / "index.csv")
     emb = np.load(DATA / "ast_emb.npy").astype(np.float32)
-    splits = json.loads((DATA / "splits.json").read_text())["A_by_episode" if split == "A" else "B_by_baby"]
-    unit = "episode" if split == "A" else "baby"
-    out_dir = ROOT / "runs" / f"ast_split{split}"
+    splits = json.loads((DATA / "splits.json").read_text())[SPLIT_KEY[split]]
+    unit = "baby" if split == "B" else "episode"
+    out_dir = ROOT / "runs" / (f"ast_personal_split{split}" if personal else f"ast_split{split}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for fold, s in enumerate(splits):
         tr = idx[idx[unit].isin(s["train"] + s["val"])]
         te = idx[idx[unit].isin(s["test"])]
-        # each episode weighs the same in total; each class weighs the same in total
-        w = 1.0 / tr.groupby("episode").episode.transform("size")
-        w = w / w.groupby(tr.cause).transform("sum")
-        clf = make_pipeline(StandardScaler(), LogisticRegression(C=0.01, max_iter=2000))
-        clf.fit(emb[tr.index], tr.cause, logisticregression__sample_weight=w.to_numpy())
-        p = pd.DataFrame(clf.predict_proba(emb[te.index]), columns=clf.classes_, index=te.index)[CLASSES]
+        groups = [(tr[tr.baby == b], te[te.baby == b]) for b in te.baby.unique()] if personal else [(tr, te)]
+        parts = []
+        for tr_g, te_g in groups:
+            # each episode weighs the same in total; each class weighs the same in total
+            w = 1.0 / tr_g.groupby("episode").episode.transform("size")
+            w = w / w.groupby(tr_g.cause).transform("sum")
+            clf = make_pipeline(StandardScaler(), LogisticRegression(C=0.01, max_iter=2000))
+            clf.fit(emb[tr_g.index], tr_g.cause, logisticregression__sample_weight=w.to_numpy())
+            pg = pd.DataFrame(0.0, columns=CLASSES, index=te_g.index)
+            pg[list(clf.classes_)] = clf.predict_proba(emb[te_g.index])  # a cause absent from training gets 0
+            parts.append(pg)
+        p = pd.concat(parts)
         p[["episode", "baby", "cause"]] = te[["episode", "baby", "cause"]]
         ep = p.groupby("episode").agg({**{c: "mean" for c in CLASSES}, "baby": "first", "cause": "first"})
         ep["pred"] = ep[CLASSES].idxmax(axis=1)
@@ -83,9 +90,10 @@ def fit(split):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("step", choices=["extract", "fit"])
-    ap.add_argument("--split", choices=["A", "B"], default="B")
+    ap.add_argument("--split", choices=["A", "B", "C"], default="B")
+    ap.add_argument("--personal", action="store_true", help="one classifier per baby (split C)")
     args = ap.parse_args()
-    extract() if args.step == "extract" else fit(args.split)
+    extract() if args.step == "extract" else fit(args.split, args.personal)
 
 
 if __name__ == "__main__":

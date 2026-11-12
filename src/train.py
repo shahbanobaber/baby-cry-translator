@@ -23,6 +23,7 @@ import torch.nn as nn
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data/processed"
 CLASSES = ["hunger", "discomfort", "loneliness"]
+SPLIT_KEY = {"A": "A_by_episode", "B": "B_by_baby", "C": "C_by_time"}
 TARGET, LABELS = "cause", CLASSES   # the identity task switches these to "baby" and the 24 babies
 
 FRAMES = 151           # 1.5 s at a 10 ms hop
@@ -45,8 +46,8 @@ class Cries:
         self.splits = json.loads((DATA / "splits.json").read_text())
 
     def rows(self, split, fold, part):
-        s = self.splits["A_by_episode" if split == "A" else "B_by_baby"][fold][part]
-        key = "episode" if split == "A" else "baby"
+        s = self.splits[SPLIT_KEY[split]][fold][part]
+        key = "baby" if split == "B" else "episode"
         return self.idx[self.idx[key].isin(s)]
 
     def fit_norm(self, train_rows):
@@ -226,7 +227,7 @@ def run_fold(data, split, fold, seed, args, device, out_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--split", choices=["A", "B"], default="A")
+    ap.add_argument("--split", choices=["A", "B", "C"], default="A")
     ap.add_argument("--task", choices=["cause", "identity"], default="cause",
                     help="identity = model 8, the positive control: which of the 24 babies is this?")
     ap.add_argument("--fold", default="all", help="fold number or 'all'")
@@ -238,8 +239,8 @@ def main():
     args = ap.parse_args()
     if args.task == "identity":
         # every baby must be on both sides, so only split A works; per-baby scaling would erase the answer
-        if args.split != "A" or args.per_baby_norm:
-            ap.error("--task identity needs split A and no --per-baby-norm")
+        if args.split == "B" or args.per_baby_norm:
+            ap.error("--task identity needs split A or C and no --per-baby-norm")
         global TARGET, LABELS
         TARGET, LABELS = "baby", sorted(pd.read_csv(DATA / "index.csv").baby.unique())
 
@@ -249,7 +250,7 @@ def main():
     print(f"device: {device}" + (f" ({torch.cuda.get_device_name()})" if device == "cuda" else ""))
 
     data = Cries(args.per_baby_norm)
-    n_folds = len(data.splits["A_by_episode" if args.split == "A" else "B_by_baby"])
+    n_folds = len(data.splits[SPLIT_KEY[args.split]])
     folds = range(n_folds) if args.fold == "all" else [int(args.fold)]
     name = args.name or ("identity_" if args.task == "identity" else "") + f"split{args.split}" + ("_perbaby" if args.per_baby_norm else "") + ("_smoke" if args.smoke else "")
     out_dir = ROOT / "runs" / name

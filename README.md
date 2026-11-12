@@ -157,6 +157,28 @@ Positive control: the same CNN naming which of the 24 babies' recordings an epis
 - The pipeline can learn from these spectrograms (66% on identity), so the weak cause scores point to the cries, not the code. Identity may include each home's background sound.
 - CNN seeds on split B scored 34.3%, 35.3% and 29.2% pooled; averaging per fold instead of pooling gives 35%.
 
+## Part 2: a translator that learns your own baby (plan fixed before results, 2026-11-12)
+
+Part 1 found that cries identify the baby far better than the cause. Part 2 asks whether a model that has heard one baby's earlier, labelled episodes can name the cause of that same baby's later episodes.
+
+**Split C, by time.** Each baby's episodes in recording order: the first two thirds train (the last 15% of those validate the CNN), the rest test. 327 train, 72 validation and 213 test episodes. Every baby is on both sides, and every test episode is later than every training episode of that baby.
+
+| Model | Trained on |
+|---|---|
+| Majority, age-only | Counting rules |
+| Baby-only | That baby's most common cause so far |
+| Baby + time of day | That baby's most common cause so far at that time (day or night) |
+| CNN, AST, random forest (pooled) | Everyone's earlier episodes |
+| AST and random forest, personal | One model per baby, only that baby's earlier episodes |
+
+The two baby lookups are what a parent's own log already tells you, with no audio. Audio has to add something on top.
+
+**Main question.** Does the personal AST model (pretrained features suit a few dozen episodes per baby) beat both baby lookups on later episodes?
+
+**Pass mark.** Its paired 95% interval against each lookup sits fully above zero. The other models are secondary.
+
+The random forest's per-baby scaling uses only the training period here, so no model sees anything from the future. The CNN is not trained per baby; 10 to 30 episodes are too few to train it from scratch.
+
 ## Changes after results
 
 None. Every number above uses the plan as committed.

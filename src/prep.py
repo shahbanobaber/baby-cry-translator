@@ -3,7 +3,8 @@
 Output (data/processed/):
   specs.npy    all spectrogram frames stacked, shape (total_frames, 64), float16
   index.csv    one row per cry: where its frames sit in specs.npy, plus baby, episode, cause
-  splits.json  split A (by episode, as in the paper) and split B (by baby)
+  splits.json  split A (by episode, as in the paper), split B (by baby),
+               split C (by time: each baby's earlier episodes train, later ones test)
 
 Cries are stored at full length. Cropping to 1.5 s happens at training time,
 so long cries can be cropped at a random place each epoch.
@@ -14,6 +15,7 @@ to the microphone, which changes between episodes.
 
 Run:  python src/prep.py            (all 39,201 cries)
       python src/prep.py --limit 200 (quick check)
+      python src/prep.py --splits-only (rewrite splits.json from index.csv)
 """
 import argparse
 import json
@@ -39,7 +41,8 @@ SEED = 0
 N_FOLDS = 6        # split B: 24 babies -> 6 groups of 4
 N_REPEATS_A = 5    # split A: repeats of the paper's 66/34 episode split
 TRAIN_SHARE_A = 0.66
-VAL_SHARE = 0.15   # split A: share of training episodes held out for early stopping
+VAL_SHARE = 0.15   # share of training episodes held out for early stopping
+TRAIN_SHARE_C = 2 / 3  # split C: each baby's first two thirds of episodes, in time order
 
 
 def log_mel(path):
@@ -99,10 +102,45 @@ def split_by_episode(eps, rng):
     return repeats
 
 
+def episode_time(episode):
+    """Recording date and time from the episode name, e.g. BM29_M_2_F_F_10102019_2058.wav."""
+    p = episode.replace(".wav", "").split("_")
+    return pd.to_datetime(p[5] + p[6], format="%d%m%Y%H%M")
+
+
+def split_by_time(eps):
+    """Split C, the personal translator. Each baby's episodes in time order:
+    the first two thirds train (the last 15% of those validate), the rest test.
+    Every baby is on both sides, and the model always predicts the future."""
+    train, val, test = [], [], []
+    eps = eps.assign(t=eps.episode.map(episode_time)).sort_values(["baby", "t"])
+    for _, g in eps.groupby("baby"):
+        ids = list(g.episode)
+        k = int(np.floor(TRAIN_SHARE_C * len(ids)))
+        v = int(np.ceil(VAL_SHARE * k))
+        train += ids[:k - v]
+        val += ids[k - v:k]
+        test += ids[k:]
+    return [{"train": sorted(train), "val": sorted(val), "test": sorted(test)}]
+
+
+def write_splits(df):
+    eps = df.drop_duplicates("episode")[["episode", "baby", "cause"]]
+    rng = np.random.default_rng(SEED)
+    splits = {"A_by_episode": split_by_episode(eps, rng), "B_by_baby": split_by_baby(eps, rng),
+              "C_by_time": split_by_time(eps)}
+    (OUT / "splits.json").write_text(json.dumps(splits, indent=1))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="only process the first N cries")
+    ap.add_argument("--splits-only", action="store_true", help="rewrite splits.json from index.csv")
     args = ap.parse_args()
+    if args.splits_only:
+        write_splits(pd.read_csv(OUT / "index.csv"))
+        print("wrote", OUT / "splits.json")
+        return
 
     df = load_labels()
     if args.limit:
@@ -129,10 +167,7 @@ def main():
     np.save(OUT / "specs.npy", np.concatenate(specs))
     df.to_csv(OUT / "index.csv", index=False)
 
-    eps = df.drop_duplicates("episode")[["episode", "baby", "cause"]]
-    rng = np.random.default_rng(SEED)
-    splits = {"A_by_episode": split_by_episode(eps, rng), "B_by_baby": split_by_baby(eps, rng)}
-    (OUT / "splits.json").write_text(json.dumps(splits, indent=1))
+    write_splits(df)
 
     print(f"done: {len(df)} cries, {df.episode.nunique()} episodes, {df.baby.nunique()} babies, "
           f"{pos} frames, median {int(np.median(lengths))} frames per cry")
