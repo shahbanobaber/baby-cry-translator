@@ -5,6 +5,7 @@ Run:  python src/train.py --split B --fold 0
       python src/train.py --split A --fold all
       python src/train.py --split B --fold all --per-baby-norm      (experiment 2)
       python src/train.py --split B --fold 0 --epochs 2 --smoke     (quick check)
+      python src/train.py --task identity                           (model 8: name the baby, split A)
 
 Writes runs/<name>/fold<k>_seed<s>.csv (one row per test episode) and .json (summary).
 Each fold is trained with 3 seeds by default.
@@ -22,6 +23,7 @@ import torch.nn as nn
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data/processed"
 CLASSES = ["hunger", "discomfort", "loneliness"]
+TARGET, LABELS = "cause", CLASSES   # the identity task switches these to "baby" and the 24 babies
 
 FRAMES = 151           # 1.5 s at a 10 ms hop
 SILENCE = -80.0        # dB floor, used for padding
@@ -38,7 +40,7 @@ class Cries:
     def __init__(self, per_baby_norm):
         self.specs = np.load(DATA / "specs.npy")  # (total_frames, 64) float16
         self.idx = pd.read_csv(DATA / "index.csv")
-        self.idx["y"] = self.idx.cause.map(CLASSES.index)
+        self.idx["y"] = self.idx[TARGET].map(LABELS.index)
         self.per_baby_norm = per_baby_norm
         self.splits = json.loads((DATA / "splits.json").read_text())
 
@@ -139,7 +141,7 @@ class CryCNN(nn.Module):
     def __init__(self):
         super().__init__()
         self.features = nn.Sequential(block(1, 16), block(16, 32), block(32, 64), block(64, 128))
-        self.head = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Dropout(0.3), nn.Linear(128, len(CLASSES)))
+        self.head = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Dropout(0.3), nn.Linear(128, len(LABELS)))
 
     def forward(self, x):
         return self.head(self.features(x))
@@ -158,18 +160,19 @@ def predict_episodes(model, data, rows, device, rng):
         chunk = wins[i:i + 512]
         x = np.stack([data.window(r, st, rng, train=False) for r, st in chunk])
         probs.append(torch.softmax(model(torch.from_numpy(x[:, None]).to(device)), 1).cpu().numpy())
-    p = pd.DataFrame(np.concatenate(probs), columns=CLASSES)
+    p = pd.DataFrame(np.concatenate(probs), columns=LABELS)
     p["cry"] = [r.Index for r, _ in wins]
-    cry = p.groupby("cry")[CLASSES].mean()
+    cry = p.groupby("cry")[LABELS].mean()
     cry = cry.join(rows[["episode", "baby", "cause"]])
-    ep = cry.groupby("episode").agg({**{c: "mean" for c in CLASSES}, "baby": "first", "cause": "first"})
+    ep = cry.groupby("episode").agg({**{c: "mean" for c in LABELS}, "baby": "first", "cause": "first"})
     ep["n_cries"] = cry.groupby("episode").size()
-    ep["pred"] = ep[CLASSES].idxmax(axis=1)
+    ep["pred"] = ep[LABELS].idxmax(axis=1)
     return ep.reset_index()
 
 
 def balanced_accuracy(ep):
-    return float(np.mean([(ep[ep.cause == c].pred == c).mean() for c in CLASSES if (ep.cause == c).any()]))
+    t = ep[TARGET]
+    return float(np.mean([(ep[t == c].pred == c).mean() for c in LABELS if (t == c).any()]))
 
 
 # ---------- training ----------
@@ -182,9 +185,9 @@ def run_fold(data, split, fold, seed, args, device, out_dir):
         train, val, test = (r[r.episode.isin(r.episode.drop_duplicates().sample(12, random_state=0))] for r in (train, val, test))
     data.fit_norm(train)
 
-    n_ep = train.drop_duplicates("episode").cause.value_counts()
-    # class weight = total / (3 x episodes of that class): rarer causes count more
-    weights = torch.tensor([n_ep.sum() / (len(CLASSES) * n_ep.get(c, 1)) for c in CLASSES], dtype=torch.float32)
+    n_ep = train.drop_duplicates("episode")[TARGET].value_counts()
+    # class weight = total / (classes x episodes of that class): rarer classes count more
+    weights = torch.tensor([n_ep.sum() / (len(LABELS) * n_ep.get(c, 1)) for c in LABELS], dtype=torch.float32)
 
     model = CryCNN().to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -214,7 +217,7 @@ def run_fold(data, split, fold, seed, args, device, out_dir):
     ep = predict_episodes(model, data, test, device, rng)
     ep["seed"], ep["fold"] = seed, fold
     ep.to_csv(out_dir / f"fold{fold}_seed{seed}.csv", index=False)
-    summary = {"split": split, "fold": fold, "seed": seed, "per_baby_norm": args.per_baby_norm,
+    summary = {"split": split, "task": args.task, "fold": fold, "seed": seed, "per_baby_norm": args.per_baby_norm,
                "test_bacc": balanced_accuracy(ep), "val_bacc_best": best,
                "test_episodes": len(ep), "test_babies": sorted(ep.baby.unique()), "history": history}
     (out_dir / f"fold{fold}_seed{seed}.json").write_text(json.dumps(summary, indent=1))
@@ -223,7 +226,9 @@ def run_fold(data, split, fold, seed, args, device, out_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--split", choices=["A", "B"], required=True)
+    ap.add_argument("--split", choices=["A", "B"], default="A")
+    ap.add_argument("--task", choices=["cause", "identity"], default="cause",
+                    help="identity = model 8, the positive control: which of the 24 babies is this?")
     ap.add_argument("--fold", default="all", help="fold number or 'all'")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--per-baby-norm", action="store_true")
@@ -231,6 +236,12 @@ def main():
     ap.add_argument("--seeds", type=int, default=3, help="train each fold this many times with different seeds")
     ap.add_argument("--name", default=None, help="run folder name")
     args = ap.parse_args()
+    if args.task == "identity":
+        # every baby must be on both sides, so only split A works; per-baby scaling would erase the answer
+        if args.split != "A" or args.per_baby_norm:
+            ap.error("--task identity needs split A and no --per-baby-norm")
+        global TARGET, LABELS
+        TARGET, LABELS = "baby", sorted(pd.read_csv(DATA / "index.csv").baby.unique())
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
@@ -240,7 +251,7 @@ def main():
     data = Cries(args.per_baby_norm)
     n_folds = len(data.splits["A_by_episode" if args.split == "A" else "B_by_baby"])
     folds = range(n_folds) if args.fold == "all" else [int(args.fold)]
-    name = args.name or f"split{args.split}" + ("_perbaby" if args.per_baby_norm else "") + ("_smoke" if args.smoke else "")
+    name = args.name or ("identity_" if args.task == "identity" else "") + f"split{args.split}" + ("_perbaby" if args.per_baby_norm else "") + ("_smoke" if args.smoke else "")
     out_dir = ROOT / "runs" / name
     out_dir.mkdir(parents=True, exist_ok=True)
     for seed in range(args.seeds):
