@@ -179,6 +179,26 @@ The two baby lookups are what a parent's own log already tells you, with no audi
 
 The random forest's per-baby scaling uses only the training period here, so no model sees anything from the future. The CNN is not trained per baby; 10 to 30 episodes are too few to train it from scratch.
 
+### Part 2 results (2026-11-12)
+
+**A baby's own history beats every audio model on that baby's later episodes.** Split C, balanced accuracy per episode, 95% interval over babies.
+
+| Model | Score | Interval |
+|---|---|---|
+| Baby-only lookup (no audio) | 45.4% | 38.8 to 50.1 |
+| Baby + time of day (no audio) | 42.3% | 36.2 to 47.7 |
+| CNN, pooled | 38.3% | 32.9 to 42.7 |
+| AST, personal (main model) | 37.9% | 30.0 to 45.8 |
+| Random forest, personal | 36.5% | 29.4 to 43.4 |
+| AST, pooled | 34.9% | 29.4 to 41.4 |
+| Majority / age-only | 33.3% | |
+| Random forest, pooled | 27.4% | 22.5 to 32.7 |
+
+- The pass mark is not met. Personal AST minus baby-only: -7.6 points (-15.0 to +2.5); minus baby + time: -4.5 (-12.0 to +4.8).
+- The personal forest is reliably worse than the baby-only lookup: -8.9 points (-15.1 to -2.4).
+- The paper's per-baby forest reached 62%. That figure is out-of-bag accuracy on single cries (cause~ac_RF.R, "One baby at a time"), with other cries from the same episode in training, and age as a feature. Scored per episode on later episodes, per-baby models land at 36 to 38%.
+- The pooled forest falls below chance. Its per-baby scaling here uses only the training period, and causes shift as babies age.
+
 ## Changes after results
 
-None. Every number above uses the plan as committed.
+None. Every number above uses the plans as committed.
