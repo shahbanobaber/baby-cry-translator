@@ -126,6 +126,37 @@ python src/ast_probe.py extract && python src/ast_probe.py fit --split B   # mod
 python src/evaluate.py runs/splitB runs/splitB_perbaby runs/forest_splitB runs/ast_splitB
 ```
 
+## Results (2026-11-12)
+
+**On babies it has never heard, no model names the cause better than chance. The same CNN tells the 24 babies apart at 66%.**
+
+Split B, new babies. Balanced accuracy per episode, 95% interval over babies, chance 33%.
+
+| Model | Score | Interval |
+|---|---|---|
+| CNN | 32.9% | 29.6 to 36.5 |
+| CNN, per-baby standardisation | 32.8% | 28.6 to 37.1 |
+| AST, frozen | 35.8% | 31.4 to 40.3 |
+| Random forest (paper) | 32.4% | 29.4 to 35.3 |
+| Age-only rule | 31.8% | 27.8 to 35.4 |
+
+Split A, the paper's split (same babies in training and test).
+
+| Model | Score | Interval |
+|---|---|---|
+| Baby-only rule | 40.6% | 34.2 to 45.5 |
+| AST, frozen | 37.9% | 34.2 to 41.2 |
+| CNN | 35.9% | 31.8 to 39.5 |
+| Random forest (paper; they report 36%) | 35.5% | 33.5 to 37.7 |
+| Age-only rule | 35.5% | 32.9 to 38.7 |
+
+Positive control: the same CNN naming which of the 24 babies' recordings an episode came from scores 66.3% (57.2 to 74.7); chance is 4.2%.
+
+- The pass mark is not met. The CNN's interval includes 33%, and it does not beat the age-only rule.
+- No model beats the age-only rule by a clear margin on either split. On split A, knowing the baby beats every acoustic model.
+- The pipeline can learn from these spectrograms (66% on identity), so the weak cause scores point to the cries, not the code. Identity may include each home's background sound.
+- CNN seeds on split B scored 34.3%, 35.3% and 29.2% pooled; averaging per fold instead of pooling gives 35%.
+
 ## Changes after results
 
-None yet.
+None. Every number above uses the plan as committed.
