@@ -2,7 +2,7 @@
 
 Can a model tell why a baby is crying? Tested on 39,201 cries from 24 babies ([Lockhart-Bouron et al., 2023](https://doi.org/10.1038/s44271-023-00022-z)), labelled hunger, discomfort or loneliness by what stopped the cry.
 
-**On new babies, every model names the cause at chance. The same CNN names the baby 66% of the time.**
+On new babies, every model names the cause at chance. The same CNN names the baby 66% of the time.
 
 ![Summary](assets/summary.png)
 
@@ -18,7 +18,7 @@ Full plan, settings and results with intervals: [METHOD.md](METHOD.md).
 
 ## Run
 
-The audio is on [OSF](https://osf.io/ru7na/) and is not included here. Unzip it into `data/raw/enes/`.
+The data is on [OSF](https://osf.io/ru7na/) and is not included here. Unzip `audio_EnesBabyCries1B_cries.zip` into `data/raw/enes/audio/`, and put `dataset_44605_short.csv` from `data.zip` in `data/raw/enes/meta/`.
 
 ```bash
 python src/prep.py                 # spectrograms and splits
