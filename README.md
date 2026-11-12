@@ -12,6 +12,18 @@ Lockhart-Bouron et al. 2023, [OSF ru7na](https://osf.io/ru7na/). 39,201 cries, 6
 | Hunger | 13,095 | 255 | 23 |
 | Discomfort | 10,497 | 164 | 23 |
 
+## Models
+
+| # | Model | Question it answers |
+|---|---|---|
+| 1 | Majority class (always "hunger") | Reference line |
+| 2 | Baby-only lookup (split A) | How far does knowing the baby get you? |
+| 3 | Random forest on the paper's 10 acoustic features | The paper's method on our splits |
+| 4 | CNN on log-mel spectrograms | The main model |
+| 5 | CNN, standardised per baby | Does cause survive once identity is removed? |
+| 6 | Whisper encoder + small classifier | Is the CNN limited by having only 612 episodes? |
+| 7 | Same CNN, trained to name the baby (24 classes) | Positive control: can this pipeline learn anything from these spectrograms? |
+
 ## Settings
 
 ### Data
