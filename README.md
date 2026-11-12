@@ -2,6 +2,10 @@
 
 Predicts why a baby is crying (hunger, discomfort, loneliness) from a log-mel spectrogram, with a small CNN. Tested on babies the model has never heard.
 
+**On new babies, every model names the cause at chance. The same CNN names the baby 66% of the time.**
+
+![Summary: identity at 66%, cause at chance](assets/summary.png)
+
 ## Data
 
 Lockhart-Bouron et al. 2023, [OSF ru7na](https://osf.io/ru7na/). 39,201 cries, 612 crying episodes, 24 babies aged 0.5 to 3.5 months, recorded at home. OSF lists no licence, so this repo never contains the audio; `src/prep.py` expects it under `data/raw/enes/`.
